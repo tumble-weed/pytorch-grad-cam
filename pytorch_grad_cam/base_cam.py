@@ -57,13 +57,15 @@ class BaseCAM:
             cam = get_2d_projection(weighted_activations)
         else:
             cam = weighted_activations.sum(axis=1)
+        # import pdb;pdb.set_trace()
         return cam
 
     def forward(self,
                 input_tensor: torch.Tensor,
                 targets: List[torch.nn.Module],
-                eigen_smooth: bool = False) -> np.ndarray:
-
+                eigen_smooth: bool = False,
+                extra = {}) -> np.ndarray:
+        # import pdb;pdb.set_trace()
         if self.cuda:
             input_tensor = input_tensor.cuda()
 
@@ -79,8 +81,11 @@ class BaseCAM:
 
         if self.uses_gradients:
             self.model.zero_grad()
-            loss = sum([target(output)
-                       for target, output in zip(targets, outputs)])
+            predicted = [target(output)
+                       for target, output in zip(targets, outputs)] 
+            probs = [p[t.category] for p,t in zip(torch.softmax(outputs,dim=-1),targets)]
+            # import pdb;pdb.set_trace()
+            loss = sum(predicted)
             loss.backward(retain_graph=True)
 
         # In most of the saliency attribution papers, the saliency is
@@ -95,6 +100,9 @@ class BaseCAM:
         cam_per_layer = self.compute_cam_per_layer(input_tensor,
                                                    targets,
                                                    eigen_smooth)
+        # import pdb;pdb.set_trace()
+        if isinstance(extra,dict):
+            extra.update(dict(probs=probs,scores=predicted))
         return self.aggregate_multi_layers(cam_per_layer)
 
     def get_target_width_height(self,
@@ -106,7 +114,9 @@ class BaseCAM:
             self,
             input_tensor: torch.Tensor,
             targets: List[torch.nn.Module],
-            eigen_smooth: bool) -> np.ndarray:
+            eigen_smooth: bool,
+            # scale: bool = True
+            ) -> np.ndarray:
         activations_list = [a.cpu().data.numpy()
                             for a in self.activations_and_grads.activations]
         grads_list = [g.cpu().data.numpy()
@@ -131,7 +141,11 @@ class BaseCAM:
                                      layer_grads,
                                      eigen_smooth)
             cam = np.maximum(cam, 0)
-            scaled = scale_cam_image(cam, target_size)
+            # import pdb;pdb.set_trace()
+            # if scale:
+            if True:
+                scaled = scale_cam_image(cam, target_size)
+            
             cam_per_target_layer.append(scaled[:, None, :])
 
         return cam_per_target_layer
@@ -139,8 +153,12 @@ class BaseCAM:
     def aggregate_multi_layers(
             self,
             cam_per_target_layer: np.ndarray) -> np.ndarray:
+        # will concatenate the different layers on the channel axis
         cam_per_target_layer = np.concatenate(cam_per_target_layer, axis=1)
-        cam_per_target_layer = np.maximum(cam_per_target_layer, 0)
+        # clamp the minimum to 0
+        cam_per_target_layer = np.maximum(cam_per_target_layer, 0) 
+        # import pdb;pdb.set_trace()
+        # cam_per_target_layer.shape == (1,1,333,500)
         result = np.mean(cam_per_target_layer, axis=1)
         return scale_cam_image(result)
 
@@ -178,7 +196,8 @@ class BaseCAM:
                  input_tensor: torch.Tensor,
                  targets: List[torch.nn.Module] = None,
                  aug_smooth: bool = False,
-                 eigen_smooth: bool = False) -> np.ndarray:
+                 eigen_smooth: bool = False,
+                 extra: dict = None) -> np.ndarray:
 
         # Smooth the CAM result with test time augmentation
         if aug_smooth is True:
@@ -186,7 +205,7 @@ class BaseCAM:
                 input_tensor, targets, eigen_smooth)
 
         return self.forward(input_tensor,
-                            targets, eigen_smooth)
+                            targets, eigen_smooth,extra)
 
     def __del__(self):
         self.activations_and_grads.release()
