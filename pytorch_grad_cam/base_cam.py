@@ -26,6 +26,7 @@ class BaseCAM:
         self.uses_gradients = uses_gradients
         self.activations_and_grads = ActivationsAndGradients(
             self.model, target_layers, reshape_transform)
+        self.batch_size = None
 
     """ Get a vector of weights for every channel in the target layer.
         Methods that return weights channels,
@@ -65,6 +66,7 @@ class BaseCAM:
                 targets: List[torch.nn.Module],
                 eigen_smooth: bool = False,
                 extra = {}) -> np.ndarray:
+        self.batch_size = 32;print('hardcoding batch_size to 32')
         # import pdb;pdb.set_trace()
         if self.cuda:
             input_tensor = input_tensor.cuda()
@@ -72,35 +74,60 @@ class BaseCAM:
         if self.compute_input_gradient:
             input_tensor = torch.autograd.Variable(input_tensor,
                                                    requires_grad=True)
+        # outputs = []
+        # gradients = []
+        cams_per_layer = []
+        all_probs = []
+        all_predicted = []        
+        for i in range((input_tensor.shape[0] + self.batch_size -1)//self.batch_size):
+            outputs = \
+                self.activations_and_grads(input_tensor[i*self.batch_size:((i+1)*self.batch_size)])
+                
+            # gradients.extend(self.activations_and_grads.gradients.detach())
 
-        outputs = self.activations_and_grads(input_tensor)
-        if targets is None:
-            target_categories = np.argmax(outputs.cpu().data.numpy(), axis=-1)
-            targets = [ClassifierOutputTarget(
-                category) for category in target_categories]
+            #------------------------------------------------------------
+            if targets is None:
+                target_categories = np.argmax(outputs.cpu().data.numpy(), axis=-1)
+                targets = [ClassifierOutputTarget(
+                    category) for category in target_categories]
 
-        if self.uses_gradients:
-            self.model.zero_grad()
-            predicted = [target(output)
-                       for target, output in zip(targets, outputs)] 
-            probs = [p[t.category] for p,t in zip(torch.softmax(outputs,dim=-1),targets)]
-            # import pdb;pdb.set_trace()
-            loss = sum(predicted)
-            loss.backward(retain_graph=True)
+            if self.uses_gradients:
+                self.model.zero_grad()
+                # import pdb;pdb.set_trace()
+                if outputs.ndim == 4:
+                    predicted = [output[target.category,...]
+                        for target, output in zip(targets, outputs)] 
+                else:
+                    predicted = [target(output)
+                        for target, output in zip(targets, outputs)] 
+                probs = [p[t.category] for p,t in zip(torch.softmax(outputs,dim=-1),targets)]
+                # import pdb;pdb.set_trace()
+                loss = sum(predicted)
+                if loss.ndim > 0:
+                    loss = loss.sum()
+                loss.backward(retain_graph=True)
 
-        # In most of the saliency attribution papers, the saliency is
-        # computed with a single target layer.
-        # Commonly it is the last convolutional layer.
-        # Here we support passing a list with multiple target layers.
-        # It will compute the saliency image for every image,
-        # and then aggregate them (with a default mean aggregation).
-        # This gives you more flexibility in case you just want to
-        # use all conv layers for example, all Batchnorm layers,
-        # or something else.
-        cam_per_layer = self.compute_cam_per_layer(input_tensor,
-                                                   targets,
-                                                   eigen_smooth)
+            # In most of the saliency attribution papers, the saliency is
+            # computed with a single target layer.
+            # Commonly it is the last convolutional layer.
+            # Here we support passing a list with multiple target layers.
+            # It will compute the saliency image for every image,
+            # and then aggregate them (with a default mean aggregation).
+            # This gives you more flexibility in case you just want to
+            # use all conv layers for example, all Batchnorm layers,
+            # or something else.
+            cam_per_layer = self.compute_cam_per_layer(input_tensor,
+                                                    targets,
+                                                    eigen_smooth)
+            cams_per_layer.append(cam_per_layer)
+            all_probs.extend(probs)
+            all_predicted.extend(predicted)
         # import pdb;pdb.set_trace()
+        probs = torch.stack(all_probs,dim=0).detach()
+        predicted = torch.stack(all_predicted,dim=0).detach()
+        cam_per_layer = [ np.concatenate([b[li] for b in cams_per_layer],axis=0) for li in range(len(cams_per_layer[0]))]
+        # import pdb;pdb.set_trace()
+                
         if isinstance(extra,dict):
             extra.update(dict(probs=probs,scores=predicted))
         return self.aggregate_multi_layers(cam_per_layer)
@@ -124,6 +151,7 @@ class BaseCAM:
         target_size = self.get_target_width_height(input_tensor)
 
         cam_per_target_layer = []
+
         # Loop over the saliency image from every layer
         for i in range(len(self.target_layers)):
             target_layer = self.target_layers[i]

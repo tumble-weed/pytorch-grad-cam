@@ -12,6 +12,7 @@ class GradCAM(BaseCAM):
             target_layers,
             use_cuda,
             reshape_transform)
+        # self.batch_size = 2
 
     def get_cam_weights(self,
                         input_tensor,
